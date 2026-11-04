@@ -1,5 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai";
-import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
+import { getBundledModels, type Model } from "@earendil-works/pi-ai";
 
 export const PROVIDER_ID = "claude-code";
 export const API_ID = "claude-code-stream-json";
@@ -18,9 +17,10 @@ export interface DiscoveredClaudeModel {
   supportsAutoMode?: boolean;
 }
 
-// Pi exposes providers/all to extensions, but not individual generated model files.
+// OMP's legacy-pi compat layer exposes the catalog through `getBundledModels`
+// instead of upstream pi's `@earendil-works/pi-ai/providers/all` subpath.
 const BUILTIN_ANTHROPIC_MODELS: Record<string, Model<"anthropic-messages">> = Object.fromEntries(
-  getBuiltinModels("anthropic").map((model) => [model.id, model]),
+  getBundledModels("anthropic").map((model) => [model.id, model as Model<"anthropic-messages">]),
 );
 const NATIVE_ROUTE_BY_ID = new Map<string, string>();
 const NATIVE_TOOL_CHANGES_BY_ID = new Map<string, boolean>();

@@ -6,6 +6,36 @@ routing all Claude model requests through the official Claude Code CLI.
 Pi still handles conversation history, approvals, compaction, and tool
 execution. Claude Code only talks to the model. It never runs tools itself.
 
+## OMP port
+
+This is a fork of `earendil-works/pi-claude-code` that runs on
+[OMP](https://github.com/can1357/oh-my-pi) instead of Pi. OMP loads legacy Pi
+extensions through a compatibility layer, but upstream's provider factory needs
+Pi-only APIs, so the host-facing glue is ported:
+
+| Upstream (Pi) | This fork (OMP) |
+| --- | --- |
+| `pi.registerProvider(createProvider({ auth, models, fetchModels, filterModels, api }))` (`@earendil-works/pi-ai.createProvider`) | `pi.registerProvider("claude-code", { api, streamSimple, models, fetchDynamicModels })` with an extension-owned api id |
+| `getBuiltinModels("anthropic")` from the `@earendil-works/pi-ai/providers/all` subpath | `getBundledModels("anthropic")` from the package root |
+| `registerSessionResourceCleanup(...)` from `@earendil-works/pi-ai` | `pi.on("session_shutdown", ...)` |
+| `renderSystemMessageUpdate` re-exported by pi-ai | local copy of the pi-ai 1.5.0 implementation in `src/transcript.ts` |
+
+Behavior differences that follow from the host API, not from a choice here:
+
+- Models are always listed. Upstream hid them until Claude Code was installed
+  and logged in (its `auth.apiKey.check` hook); OMP has no per-provider auth
+  check, so an unauthenticated setup fails at request time instead. Use
+  `/claude-code-status` to check.
+- Discovered models are merged with the static fallback catalog. Upstream
+  narrowed the list to what the account reports (`filterModels`); OMP has no
+  equivalent hook.
+- `PI_CLAUDE_CODE_COMMAND` and `PI_CLAUDE_CODE_CONFIG_DIR` come from the process
+  environment only. Upstream read them through a per-provider env hook.
+
+`tests/` and `tsc --noEmit` still target the upstream Pi packages and are not
+runnable against OMP's host shim; the port is verified through OMP itself
+(model listing, discovery, text and tool-call turns).
+
 > [!WARNING]
 > **The future of this extension is uncertain.** Right now it works by running
 > Pi's requests through the official Claude Code CLI in non-interactive mode
@@ -25,7 +55,7 @@ execution. Claude Code only talks to the model. It never runs tools itself.
 
 ## Requirements
 
-- Pi
+- OMP (`omp`)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code), installed and
   on your `PATH`:
 
@@ -38,11 +68,15 @@ execution. Claude Code only talks to the model. It never runs tools itself.
 ## Installation
 
 ```sh
-pi install https://github.com/earendil-works/pi-claude-code
+omp plugin link /path/to/this/fork
 ```
 
-Then pick a model from the **Claude Code Subscription (Experimental)** provider
-in Pi.
+Then pick a model from the **claude-code** provider (`claude-code/<model>`).
+
+`omp plugin install <git-url>` works too, as long as the plugin is not installed
+with a copy of the real Pi packages beside it: this fork resolves
+`@earendil-works/pi-ai` through OMP's compatibility layer, not through
+`node_modules`.
 
 ## Login and logout
 

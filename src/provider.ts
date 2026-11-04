@@ -1,109 +1,110 @@
-import { createProvider, type AuthContext, type ProviderEnv } from "@earendil-works/pi-ai";
-import { discoverClaudeModels, getClaudeStatus, LOGIN_HINT } from "./claude-cli.ts";
-import { API_ID, CLAUDE_CODE_MODELS, modelFromDiscovery, PROVIDER_ID } from "./model-catalog.ts";
+import { normalizeContext, type Context, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { discoverClaudeModels, getClaudeStatus } from "./claude-cli.ts";
+import { API_ID, CLAUDE_CODE_MODELS, modelFromDiscovery, PROVIDER_ID, type ClaudeCodeModel } from "./model-catalog.ts";
 import { streamClaudeCode } from "./stream.ts";
 
-const PROVIDER_ENV_NAMES = ["PI_CLAUDE_CODE_COMMAND", "PI_CLAUDE_CODE_CONFIG_DIR", "CLAUDE_CONFIG_DIR"] as const;
+/**
+ * OMP port of the upstream pi provider factory.
+ *
+ * Upstream registered a `createProvider({ auth, models, fetchModels, filterModels, api })`
+ * object through pi's single-argument `pi.registerProvider(provider)`. OMP has no
+ * `createProvider` export and only accepts `pi.registerProvider(name, config)`, where the
+ * transport is an extension-owned `api` id served by `streamSimple`. The Claude Code
+ * side is unchanged: requests still run through `claude -p` and never through an HTTP
+ * client owned by the host.
+ *
+ * Consequences of the shape difference, all intentional:
+ * - Authentication is not consulted per request. Claude Code owns its credentials and the
+ *   stream path rejects conflicting auth/backend env overrides itself, so the provider is
+ *   registered with a placeholder `apiKey` that is never sent anywhere.
+ * - `auth.apiKey.check` used to hide models when Claude Code is missing or logged out.
+ *   OMP has no equivalent hook, so the models stay listed and `/claude-code-status`
+ *   reports the real state.
+ * - `filterModels` (which narrowed the catalog to models the account reports) has no OMP
+ *   counterpart; discovered models are merged alongside the static fallback rows.
+ */
 
-async function providerEnvironment(ctx: AuthContext): Promise<ProviderEnv | undefined> {
-  const env: ProviderEnv = {};
-  await Promise.all(
-    PROVIDER_ENV_NAMES.map(async (name) => {
-      const value = await ctx.env(name);
-      if (value !== undefined) env[name] = value;
-    }),
-  );
-  return Object.keys(env).length ? env : undefined;
+/** Model rows accepted by OMP's `registerProvider`; extra pi model metadata is not sent. */
+interface ProviderModelRow {
+  id: string;
+  name: string;
+  api: string;
+  reasoning: boolean;
+  input: ("text" | "image")[];
+  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  contextWindow: number;
+  maxTokens: number;
 }
 
-// Pi resolves provider-scoped settings (such as PI_CLAUDE_CODE_COMMAND) only
-// through auth hooks. Remember the latest values so model discovery and the
-// status command look at the same Claude Code installation as requests do.
-let lastProviderEnv: ProviderEnv | undefined;
+/** Claude Code owns CLI discovery; bound it below OMP's 15s runtime discovery cap. */
+const DISCOVERY_TIMEOUT_MS = 12_000;
 
 /** The environment used to locate and configure Claude Code. */
 export function claudeCodeEnv(): Record<string, string | undefined> {
-  return { ...process.env, ...lastProviderEnv };
+  return process.env;
 }
 
-export function createClaudeCodeProvider() {
-  let discoveredIds: Set<string> | undefined;
-  const externalOAuthMarker = () => ({
-    type: "oauth" as const,
-    access: "claude-code-external",
-    refresh: "claude-code-external",
-    expires: Date.now() + 365 * 24 * 60 * 60 * 1_000,
+function toProviderModel(model: ClaudeCodeModel): ProviderModelRow {
+  return {
+    id: model.id,
+    name: model.name,
+    api: API_ID,
+    reasoning: model.reasoning,
+    input: model.input,
+    cost: model.cost,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+  };
+}
+
+function staticModels(): ProviderModelRow[] {
+  return CLAUDE_CODE_MODELS.map(toProviderModel);
+}
+
+/**
+ * OMP hands providers a `Context` (system prompt and tools beside the messages), while
+ * the Claude Code relay works on a transcript with both folded into a leading system
+ * message.
+ */
+function toTranscript(context: Context) {
+  const systemPrompt = Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n\n") : context.systemPrompt;
+  return normalizeContext({
+    systemPrompt,
+    tools: context.tools as never,
+    messages: context.messages as never,
   });
-  return createProvider({
-    id: PROVIDER_ID,
-    name: "Claude Code Subscription (Experimental)",
+}
+
+export function registerClaudeCodeProvider(pi: ExtensionAPI): void {
+  pi.registerProvider(PROVIDER_ID, {
     baseUrl: "process://claude-code",
-    auth: {
-      apiKey: {
-        name: "Claude Code login",
-        // Report the external Claude Code subscription as OAuth-shaped auth so
-        // Pi can label list-price accounting as "(sub)". Requests still resolve
-        // through this ambient method; credentials remain owned by Claude Code.
-        async check({ ctx, signal }) {
-          const providerEnv = await providerEnvironment(ctx);
-          lastProviderEnv = providerEnv;
-          const status = await getClaudeStatus(claudeCodeEnv(), signal);
-          // Only report the provider as configured when Claude Code is
-          // installed and logged in, so Pi hides its models otherwise.
-          if (!status.available || !status.loggedIn) return undefined;
-          return {
-            type: status.subscription ? "oauth" : "api_key",
-            source: status.subscription ? `Claude Code ${status.plan ?? "subscription"}` : "Claude Code CLI",
-          };
-        },
-        async resolve({ ctx, signal }) {
-          signal.throwIfAborted();
-          const providerEnv = await providerEnvironment(ctx);
-          lastProviderEnv = providerEnv;
-          return {
-            auth: { apiKey: "external-process" },
-            env: providerEnv,
-            source: "Claude Code CLI",
-          };
-        },
-      },
-      // Metadata marker for Pi's subscription-aware UI. This is deliberately
-      // not the request auth path and never imports Claude Code credentials.
-      // Login and logout are handled by the Claude Code CLI itself.
-      oauth: {
-        name: "Claude Code subscription (managed by Claude Code)",
-        isSubscription: true,
-        async login() {
-          throw new Error(
-            "Claude Code manages its own login. Run `claude auth login` in a terminal instead; " +
-              "this provider uses it automatically.",
-          );
-        },
-        async refresh(_credential, signal) {
-          const status = await getClaudeStatus(claudeCodeEnv(), signal);
-          if (!status.subscription) throw new Error(LOGIN_HINT);
-          return externalOAuthMarker();
-        },
-        async toAuth() {
-          return { apiKey: "external-process" };
-        },
-      },
-    },
-    models: CLAUDE_CODE_MODELS,
-    async fetchModels({ signal }) {
-      const models = (await discoverClaudeModels(claudeCodeEnv(), signal)).map(modelFromDiscovery);
-      discoveredIds = new Set(models.map((model) => model.id));
-      return models;
-    },
-    filterModels(models) {
-      const ids = discoveredIds;
-      return ids ? models.filter((model) => ids.has(model.id)) : models;
-    },
-    api: {
-      stream: streamClaudeCode,
-      streamSimple: streamClaudeCode,
+    api: API_ID,
+    // Placeholder credential: it only marks the provider as configured. Requests are
+    // served by `streamSimple`, which spawns Claude Code with its own login.
+    apiKey: "external-process",
+    models: staticModels(),
+    streamSimple: (model: Model<never>, context: Context, options?: SimpleStreamOptions) =>
+      streamClaudeCode(model as never, toTranscript(context) as never, options),
+    async fetchDynamicModels() {
+      try {
+        const discovered = await discoverClaudeModels(claudeCodeEnv(), undefined, DISCOVERY_TIMEOUT_MS);
+        return discovered.map((info) => toProviderModel(modelFromDiscovery(info)));
+      } catch {
+        // Claude Code missing, logged out, or too slow: keep the static rows.
+        return staticModels();
+      }
     },
   });
+}
+
+/** Report whether Claude Code is installed and logged in, for the status command. */
+export async function reportClaudeStatus(): Promise<{ ready: boolean; detail: string }> {
+  const status = await getClaudeStatus(claudeCodeEnv(), undefined);
+  if (!status.available || !status.loggedIn) {
+    return { ready: false, detail: status.detail ?? "Claude Code is not ready" };
+  }
+  return { ready: true, detail: status.plan ? `Claude Code is installed and logged in (${status.plan})` : "Claude Code is installed and logged in" };
 }
 
 export { API_ID, PROVIDER_ID };

@@ -6,7 +6,6 @@ import { delimiter, dirname, extname, isAbsolute, join, resolve } from "node:pat
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import { spawn, type ChildProcess } from "node:child_process";
-import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { TurnRelay } from "./turn-relay.ts";
 import { usageCreditsAllowed, usageCreditsChargeError, type RateLimitInfo } from "./billing.ts";
 import { envFlagEnabled } from "./env.ts";
@@ -1186,10 +1185,6 @@ export async function closeClaudeProcesses(sessionId?: string): Promise<void> {
 export function cachedClaudeProcessCount(): number {
   return processCache.size;
 }
-
-registerSessionResourceCleanup((sessionId) => {
-  void closeClaudeProcesses(sessionId);
-});
 
 export async function runClaudeRequest(input: RunClaudeInput): Promise<RunClaudeOutput> {
   input.signal?.throwIfAborted();

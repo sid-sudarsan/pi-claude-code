@@ -23,7 +23,7 @@
     "ARCHITECTURE.md",
     "LICENSE"
   ],
-  "pi": {
+  "omp": {
     "extensions": [
       "./src/index.ts"
     ]
@@ -31,10 +31,6 @@
   "scripts": {
     "test": "node --experimental-transform-types --test tests/*.test.ts",
     "check": "tsc --noEmit"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^1.5.0",

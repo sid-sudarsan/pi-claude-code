@@ -1,8 +1,8 @@
 import {
+  contentText,
   getDeclaredTools,
   getInitialSystemMessage,
   hasToolRedefinitions,
-  renderSystemMessageUpdate,
   type AssistantMessage,
   type ImageContent,
   type Message,
@@ -26,6 +26,27 @@ const DEFERRED_TOOL_PLACEHOLDER = {
   input_schema: { type: "object", properties: {}, required: [] },
   defer_loading: true,
 };
+
+/**
+ * Render a later system message for transports that accept system messages
+ * mid-conversation. Section changes are framed by name so the model can relate them to
+ * the leading prompt. Copied from pi-ai 1.5.0 `utils/text.ts`: OMP's compat layer
+ * re-exports the sibling helpers (`contentText`, `getSystemMessageText`) but not this one,
+ * and the framing is part of the wire format this extension replays.
+ */
+function renderSystemMessageUpdate(message: { content?: unknown; sections?: Record<string, string | null> }): string {
+  const parts: string[] = [];
+  const text = contentText(message.content);
+  if (text.length > 0) parts.push(text);
+  for (const [name, value] of Object.entries(message.sections ?? {})) {
+    parts.push(
+      value === null
+        ? `Removed system prompt section "${name}".`
+        : `Updated system prompt section "${name}":\n\n${value}`,
+    );
+  }
+  return parts.join("\n\n");
+}
 
 export interface NativeSystemInjection {
   /** Insert immediately before this zero-based assistant message, or at the request tail. */
